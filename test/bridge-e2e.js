@@ -71,6 +71,16 @@ function client(session) {
     assert.strictEqual(a.attr('apiKeyText', 'password'), true);
   });
 
+  await step('MenuStrip becomes a real menubar: menus, separators, access keys, shortcuts', async () => {
+    const bar = a.model.ids.get('menu');
+    assert.strictEqual(bar.tag, 'menubar');
+    assert.deepStrictEqual(bar.children.map((c) => `${c.id}:${c.tag}:${c.attrs.label}:${c.attrs.accesskey}`),
+      ['file:menu:File:alt+f', 'edit:menu:Edit:alt+e', 'help:menu:Help:alt+h']);
+    assert.deepStrictEqual(bar.children[0].children.map((c) => c.tag), ['menuitem', 'menuitem', 'menuitem', 'menuitem', 'menuseparator', 'menuitem']);
+    assert.strictEqual(a.attr('exitItem', 'label'), 'Exit', 'no more "File › Exit" flattening');
+    assert.strictEqual(a.model.commands.get('cmd_importItem').key, 'ctrl+o');
+  });
+
   await step("the app's own Timer drives live updates", async () => {
     const t0 = a.attr('clockLabel', 'value');
     await until(() => a.attr('clockLabel', 'value') !== t0, 'clock ticks', 3000);

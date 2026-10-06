@@ -42,6 +42,7 @@ flags). HttpListener needs a URL ACL for `--host *`
   Forms the app opens (dialogs, extra windows) go to the session that acted last.
 - Clicks call the control's `OnClick` (or `ToolStripItem.PerformClick`), so app handlers and
   `Button.DialogResult` behave as usual. `&` mnemonics become `alt+` keys, and menu `ShortcutKeys` carry over.
+- Menus open and close in the browser without a round trip; only choosing an item reaches the app.
 
 ## Dialogs
 
@@ -68,7 +69,8 @@ Uploads are limited to 100 MB.
 |---|---|
 | Form | window (extra forms and dialogs become more windows) |
 | Button, ToolStripButton, ToolStripMenuItem | button / toolbarbutton + command |
-| MenuStrip | toolbar; leaf items are flattened to "File › Exit" |
+| MenuStrip | menubar with menus, submenus, separators and check items; `&File` opens with Alt+F, `ShortcutKeys` are shown and bound |
+| ToolStripDropDownButton, ToolStripSplitButton | a drop-down menu in the toolbar |
 | TextBox, MaskedTextBox, RichTextBox, NumericUpDown | textbox (`password` for PasswordChar) |
 | CheckBox, RadioButton | checkbox (radio exclusivity stays WinForms' own) |
 | ComboBox, ToolStripComboBox | menulist |
@@ -83,7 +85,7 @@ Uploads are limited to 100 MB.
 - The app's `Main()` is not run (xulj-host instantiates the form), so setup done in `Main` is skipped.
 - Dialogs called through P/Invoke (`user32!MessageBox`, `GetOpenFileName`) are not intercepted;
   only the managed APIs listed under Dialogs are.
-- Owner-drawn controls, custom painting and images do not render. Menus are flattened. Grid and
-  list selection, and cell editing, are not mapped yet.
+- Owner-drawn controls, custom painting and images do not render. Context menus
+  (`ContextMenuStrip`), grid and list selection, and cell editing are not mapped yet.
 - Every session is a live form instance on the host, with no authentication and no session limit.
 - Layout inference covers designer-style forms; heavily overlapping absolute layouts come out as rows.

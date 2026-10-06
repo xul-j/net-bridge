@@ -89,6 +89,7 @@ namespace XulJ.Bridge
             var named = nameFrom ?? o;
             string name = (named as Control)?.Name ?? (named as ToolStripItem)?.Name ?? "";
             name = Regex.Replace(name, "[^A-Za-z0-9_.-]", "");
+            if (name.Length == 0 && named is ToolStripItem ti && !(ti is ToolStripSeparator)) name = Slug(ti.Text);
             if (name.Length == 0 || !Regex.IsMatch(name, "^[A-Za-z_]")) name = o.GetType().Name.ToLowerInvariant();
             id = name;
             for (int n = 2; used.Contains(id) || id.Contains("__"); n++) id = name.Replace("__", "_") + n;
@@ -299,6 +300,7 @@ namespace XulJ.Bridge
             switch (c)
             {
                 case StatusStrip ss: return Strip(ss, "statusbar", parentId, order, live);
+                case MenuStrip ms: return Strip(ms, "menubar", parentId, order, live);
                 case ToolStrip ts: return Strip(ts, "toolbar", parentId, order, live);
                 case Button b:
                     n = Add(c, "button", parentId, order, live);
@@ -460,25 +462,59 @@ namespace XulJ.Bridge
         {
             var n = Add(ts, tag, parentId, order, live);
             int i = 0;
-            foreach (ToolStripItem item in ts.Items) ToolItemTree(item, n.Id, ref i, "", live);
+            foreach (ToolStripItem item in ts.Items)
+            {
+                // Anything with drop-down items is a menu: File/Edit in a MenuStrip, a drop-down button in a ToolStrip.
+                var made = item is ToolStripDropDownItem dd && dd.DropDownItems.Count > 0
+                    ? Menu(dd, n.Id, i, true, live)
+                    : tag == "menubar" ? MenuEntry(item, n.Id, i, live) : ToolItem(item, n.Id, i, live);
+                if (made != null) i++;
+            }
             if (!ts.Visible && (ts.Parent == null || ts.Parent.Visible)) n.Attrs["hidden"] = true;
             return n;
         }
 
-        // Menus have no XUL-J widget yet: leaf menu items flatten into buttons labelled "File › Exit".
-        void ToolItemTree(ToolStripItem item, string parentId, ref int order, string path, HashSet<object> live)
+        // Menus open and close in the browser; only choosing a leaf item reaches the bridge.
+        VNode Menu(ToolStripDropDownItem dd, string parentId, int order, bool topLevel, HashSet<object> live)
         {
-            if (item is ToolStripDropDownItem dd && dd.DropDownItems.Count > 0)
+            var n = Add(dd, "menu", parentId, order, live);
+            n.Attrs["label"] = Mnemonic(dd.Text);
+            if (topLevel)
             {
-                foreach (ToolStripItem child in dd.DropDownItems)
-                    ToolItemTree(child, parentId, ref order, path + Mnemonic(dd.Text) + " › ", live);
-                return;
+                var key = KeyFor(dd.Text, null); // &File → alt+f
+                if (key != null) n.Attrs["accesskey"] = key;
             }
-            var n = ToolItem(item, parentId, order, live, path);
-            if (n != null) order++;
+            if (!dd.Enabled) n.Attrs["disabled"] = true;
+            if (!dd.Available) n.Attrs["hidden"] = true;
+            int i = 0;
+            foreach (ToolStripItem child in dd.DropDownItems)
+                if (MenuEntry(child, n.Id, i, live) != null) i++;
+            return n;
         }
 
-        VNode ToolItem(ToolStripItem item, string parentId, int order, HashSet<object> live, string path = "")
+        VNode MenuEntry(ToolStripItem item, string parentId, int order, HashSet<object> live)
+        {
+            if (item is ToolStripSeparator)
+            {
+                var sep = Add(item, "menuseparator", parentId, order, live);
+                if (!item.Available) sep.Attrs["hidden"] = true;
+                return sep;
+            }
+            if (item is ToolStripDropDownItem dd && dd.DropDownItems.Count > 0) return Menu(dd, parentId, order, false, live);
+            var n = Add(item, "menuitem", parentId, order, live);
+            n.Attrs["label"] = Mnemonic(item.Text);
+            string key = null;
+            if (item is ToolStripMenuItem mi)
+            {
+                if (mi.ShortcutKeys != Keys.None) key = KeyName(mi.ShortcutKeys);
+                if (mi.CheckOnClick || mi.Checked) n.Attrs["checked"] = mi.Checked;
+            }
+            Command(n, item.Enabled, key);
+            if (!item.Available) n.Attrs["hidden"] = true;
+            return n;
+        }
+
+        VNode ToolItem(ToolStripItem item, string parentId, int order, HashSet<object> live)
         {
             VNode n;
             switch (item)
@@ -505,7 +541,7 @@ namespace XulJ.Bridge
                     return Widget(tt.TextBox, parentId, order, live);
                 default:
                     n = Add(item, "toolbarbutton", parentId, order, live);
-                    n.Attrs["label"] = path + Mnemonic(item.Text);
+                    n.Attrs["label"] = Mnemonic(item.Text);
                     string key = null;
                     if (item is ToolStripMenuItem mi && mi.ShortcutKeys != Keys.None) key = KeyName(mi.ShortcutKeys);
                     Command(n, item.Enabled, key);
@@ -542,6 +578,13 @@ namespace XulJ.Bridge
             string name = k >= Keys.D0 && k <= Keys.D9 ? ((int)(k - Keys.D0)).ToString() : k.ToString().ToLowerInvariant();
             if (k == Keys.Return) name = "enter";
             return sb.Append(name).ToString();
+        }
+
+        static string Slug(string label)
+        {
+            var words = Regex.Split(Regex.Replace(Mnemonic(label), "[^A-Za-z0-9 ]", " ").Trim(), "\\s+").Where(w => w.Length > 0).ToList();
+            if (words.Count == 0) return "";
+            return words[0].ToLowerInvariant() + string.Concat(words.Skip(1).Select(w => char.ToUpperInvariant(w[0]) + w.Substring(1).ToLowerInvariant()));
         }
 
         static string Mnemonic(string text) => Regex.Replace(text ?? "", "&(&?)", "$1");
