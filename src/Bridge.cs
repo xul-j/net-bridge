@@ -44,6 +44,7 @@ namespace XulJ.Bridge
         public readonly List<string> Log = new List<string>();
         public readonly List<BlockingCollection<string>> Subscribers = new List<BlockingCollection<string>>();
         public int Seq;
+        public string ThemeJson;
         public DateTime LastSeen = DateTime.UtcNow;
         public bool Ended;
 
@@ -193,6 +194,16 @@ namespace XulJ.Bridge
                 try
                 {
                     s.Renderer.Render(s.Forms);
+                    var theme = s.Renderer.Theme;
+                    string themeJson = theme == null ? null : Json.Write(theme);
+                    if (themeJson != null && themeJson != s.ThemeJson)
+                    {
+                        s.ThemeJson = themeJson;
+                        var op = new Dictionary<string, object> { { "op", "theme" }, { "tokens", theme } };
+                        // An app that is dark already looks right in dark mode too.
+                        if (IsDark(s.Forms[0].BackColor)) op["dark"] = theme;
+                        s.Emit(op);
+                    }
                     foreach (var op in s.Reconciler.Diff(s.Renderer.Nodes, s.Renderer.Commands)) s.Emit(op);
                 }
                 catch (Exception e) { opt.Log.WriteLine("render failed: " + e); }
@@ -219,6 +230,81 @@ namespace XulJ.Bridge
                 s.EmitTransient(new Dictionary<string, object> { { "op", "download" }, { "url", "/download/" + d.Token }, { "name", d.Name } });
             }
         }
+
+        static bool IsDark(Color c) => (0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) / 255 < 0.35;
+
+        static readonly MethodInfo OnDoubleClick = typeof(Control).GetMethod("OnDoubleClick", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly MethodInfo OnMouseDoubleClick = typeof(Control).GetMethod("OnMouseDoubleClick", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        static void Invoke(object target, string method, params object[] args)
+        {
+            var m = target.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, null, args.Select(a => a.GetType()).ToArray(), null);
+            m?.Invoke(target, args);
+        }
+
+        // Selecting rows the way a user would, so SelectionChanged and friends fire.
+        static void SelectRows(Control target, List<int> rows)
+        {
+            switch (target)
+            {
+                case DataGridView g:
+                    g.ClearSelection();
+                    if (rows.Count > 0)
+                    {
+                        var col = g.Columns.Cast<DataGridViewColumn>().Where(c => c.Visible).OrderBy(c => c.DisplayIndex).FirstOrDefault();
+                        if (col != null) g.CurrentCell = g.Rows[rows[0]].Cells[col.Index];
+                    }
+                    foreach (var r in rows) g.Rows[r].Selected = true;
+                    break;
+                case ListBox lb:
+                    if (lb.SelectionMode == SelectionMode.One) { lb.SelectedIndex = rows.Count > 0 ? rows[0] : -1; break; }
+                    lb.ClearSelected();
+                    foreach (var r in rows) lb.SetSelected(r, true);
+                    break;
+                case ListView lv:
+                    for (int i = 0; i < lv.Items.Count; i++) lv.Items[i].Selected = rows.Contains(i);
+                    if (rows.Count > 0) lv.FocusedItem = lv.Items[rows[0]];
+                    break;
+            }
+        }
+
+        static void Activate(Control target, int row)
+        {
+            SelectRows(target, new List<int> { row });
+            switch (target)
+            {
+                case DataGridView g:
+                    var col = g.CurrentCell?.ColumnIndex ?? 0;
+                    Invoke(g, "OnCellDoubleClick", new DataGridViewCellEventArgs(col, row));
+                    OnDoubleClick.Invoke(g, new object[] { EventArgs.Empty });
+                    break;
+                case ListView lv:
+                    Invoke(lv, "OnItemActivate", EventArgs.Empty);
+                    OnDoubleClick.Invoke(lv, new object[] { EventArgs.Empty });
+                    break;
+                default:
+                    OnDoubleClick.Invoke(target, new object[] { EventArgs.Empty });
+                    OnMouseDoubleClick.Invoke(target, new object[] { new MouseEventArgs(MouseButtons.Left, 2, 0, 0, 0) });
+                    break;
+            }
+        }
+
+        // Lets the app's Opening handler run as if the menu were opening over `source`.
+        static void OpenContextMenu(ContextMenuStrip strip, Control source)
+        {
+            var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            var prop = typeof(ContextMenuStrip).GetProperty("SourceControlInternal", flags);
+            if (prop != null && prop.CanWrite) prop.SetValue(strip, source, null);
+            else
+            {
+                var field = typeof(ContextMenuStrip).GetFields(flags).FirstOrDefault(f => f.FieldType == typeof(Control) && f.Name.ToLowerInvariant().Contains("source"));
+                field?.SetValue(strip, source);
+            }
+            Invoke(strip, "OnOpening", new System.ComponentModel.CancelEventArgs());
+        }
+
+        static int RowCount(Control c) =>
+            c is DataGridView g ? g.Rows.Cast<DataGridViewRow>().Count(r => !r.IsNewRow) : c is ListBox lb ? lb.Items.Count : c is ListView lv ? lv.Items.Count : 0;
 
         static void HideOffscreen(Form f)
         {
@@ -264,6 +350,38 @@ namespace XulJ.Bridge
                 if (target is ToolStripItem item) action = () => item.PerformClick();
                 else if (target is Control ctl) action = () => OnClick.Invoke(ctl, new object[] { EventArgs.Empty });
                 else return 404;
+                return 202;
+            }
+            if (op == "select" || op == "activate")
+            {
+                string id = msg.TryGetValue("id", out var i) ? i as string : null;
+                var target = id == null ? null : s.Renderer.Lookup(id) as Control;
+                if (!(target is DataGridView || target is ListBox || target is ListView)) return 404;
+                if (!target.Enabled) return 409;
+                int count = RowCount(target);
+                if (op == "activate")
+                {
+                    if (!(msg.TryGetValue("row", out var rv) && rv is double rd) || rd < 0 || rd >= count || rd != Math.Floor(rd)) return 400;
+                    action = () => Activate(target, (int)rd);
+                    return 202;
+                }
+                if (!(msg.TryGetValue("rows", out var rl) && rl is List<object> list)) return 400;
+                var rows = new List<int>();
+                foreach (var x in list)
+                {
+                    if (!(x is double xd) || xd < 0 || xd >= count || xd != Math.Floor(xd)) return 400;
+                    rows.Add((int)xd);
+                }
+                if (target is ListBox lbx && lbx.SelectionMode == SelectionMode.None) return 409;
+                action = () => SelectRows(target, rows.Distinct().ToList());
+                return 202;
+            }
+            if (op == "contextmenu")
+            {
+                var strip = msg.TryGetValue("id", out var pid) && pid is string ps ? s.Renderer.Lookup(ps) as ContextMenuStrip : null;
+                var source = msg.TryGetValue("target", out var tid) && tid is string ts ? s.Renderer.Lookup(ts) as Control : null;
+                if (strip == null || source == null || source.ContextMenuStrip != strip) return 404;
+                action = () => OpenContextMenu(strip, source);
                 return 202;
             }
             if (op == "input")

@@ -3,6 +3,7 @@
 // Anchor Left|Right becomes flex. Unknown controls degrade to a labelled placeholder.
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -41,6 +42,9 @@ namespace XulJ.Bridge
 
         public List<VNode> Nodes => nodes;
         public Dictionary<string, Dictionary<string, object>> Commands => commands;
+        /// <summary>Theme tokens taken from the main form (colours, font, density).</summary>
+        public Dictionary<string, object> Theme { get; private set; }
+        List<ContextMenuStrip> popups;
 
         public object Lookup(string id) { object o; return byId.TryGetValue(id, out o) ? o : null; }
 
@@ -49,8 +53,10 @@ namespace XulJ.Bridge
             nodes = new List<VNode>();
             commands = new Dictionary<string, Dictionary<string, object>>();
             var live = new HashSet<object>();
+            Theme = forms.Count > 0 && !forms[0].IsDisposed ? ThemeOf(forms[0]) : null;
             for (int i = 0; i < forms.Count; i++)
             {
+                popups = new List<ContextMenuStrip>();
                 var f = forms[i];
                 if (f.IsDisposed) continue;
                 var win = Add(f, "window", "root", i, live);
@@ -69,6 +75,15 @@ namespace XulJ.Bridge
                     if (msg != null) AddBox(win.Id + "__msg", "description", win.Id, -1).Attrs["value"] = msg.GetValue(f) as string ?? "";
                 }
                 LayoutChildren(f, win.Id, live);
+                // Context menus used in this window, rendered once each as menupopups.
+                int k = 0;
+                foreach (var strip in popups.Distinct())
+                {
+                    var pop = Add(strip, "menupopup", win.Id, 10000 + k++, live);
+                    int j = 0;
+                    foreach (ToolStripItem item in strip.Items)
+                        if (MenuEntry(item, pop.Id, j, live) != null) j++;
+                }
             }
             // Forget controls that are gone so their ids can be reused.
             foreach (var dead in ids.Keys.Where(k => !live.Contains(k)).ToList())
@@ -361,10 +376,14 @@ namespace XulJ.Bridge
                     n = Add(c, "tree", parentId, order, live);
                     n.Attrs["cols"] = new List<object> { Col("c0", "Items", null) };
                     n.Rows = lb.Items.Cast<object>().Select(it => new Dictionary<string, object> { { "c0", lb.GetItemText(it) } }).ToList();
+                    n.Attrs["seltype"] = lb.SelectionMode == SelectionMode.None ? "none" : lb.SelectionMode == SelectionMode.One ? "single" : "multiple";
+                    n.Attrs["selection"] = lb.SelectedIndices.Cast<int>().OrderBy(x => x).ToList();
                     break;
                 case Label l:
                     n = Add(c, "label", parentId, order, live);
                     n.Attrs["value"] = Mnemonic(l.Text);
+                    var role = RoleOf(l.ForeColor, l.Parent?.ForeColor ?? SystemColors.ControlText);
+                    if (role != null) n.Attrs["class"] = role;
                     break;
                 case TabControl tabs:
                     n = Add(c, "tabbox", parentId, order, live);
@@ -412,7 +431,47 @@ namespace XulJ.Bridge
             }
             if (!c.Enabled && !n.Attrs.ContainsKey("command")) n.Attrs["disabled"] = true;
             if (!c.Visible && (c.Parent == null || c.Parent.Visible)) n.Attrs["hidden"] = true;
+            if (c.ContextMenuStrip != null && popups != null)
+            {
+                popups.Add(c.ContextMenuStrip);
+                n.Attrs["contextmenu"] = IdOf(c.ContextMenuStrip);
+            }
             return n;
+        }
+
+        // ---- theme and semantic colours ------------------------------------------------
+
+        static string Hex(Color c) => "#" + c.R.ToString("x2") + c.G.ToString("x2") + c.B.ToString("x2");
+
+        static Dictionary<string, object> ThemeOf(Form f)
+        {
+            var t = new Dictionary<string, object>
+            {
+                { "background", Hex(f.BackColor) }, { "chrome", Hex(SystemColors.Control) }, { "surface", Hex(SystemColors.Window) },
+                { "text", Hex(f.ForeColor) }, { "muted", Hex(SystemColors.GrayText) }, { "border", Hex(SystemColors.ControlDark) },
+                { "accent", Hex(SystemColors.Highlight) }, { "accentText", Hex(SystemColors.HighlightText) },
+                { "radius", 2 },
+            };
+            float pt = f.Font.SizeInPoints;
+            t["density"] = pt <= 9f ? "compact" : pt >= 11f ? "comfortable" : "normal";
+            string family = f.Font.FontFamily.Name.ToLowerInvariant();
+            t["font"] = family.Contains("mono") || family.Contains("consolas") || family.Contains("courier") ? "mono"
+                : family.Contains("times") || family.Contains("georgia") || family.Contains("serif") && !family.Contains("sans") ? "serif"
+                : family.Contains("ms sans serif") || family.Contains("microsoft sans serif") || family.Contains("tahoma") ? "classic"
+                : "system";
+            return t;
+        }
+
+        /// <summary>A label painted in a colour of its own gets a role, so it still reads in dark mode.</summary>
+        static string RoleOf(Color fore, Color parentFore)
+        {
+            if (fore.ToArgb() == parentFore.ToArgb() || fore.ToArgb() == SystemColors.ControlText.ToArgb()) return null;
+            float sat = fore.GetSaturation(), light = fore.GetBrightness(), hue = fore.GetHue();
+            if (sat < 0.15f) return light > 0.3f && light < 0.75f ? "muted" : null;
+            if (hue < 18 || hue >= 340) return "danger";
+            if (hue < 65) return "warning";
+            if (hue < 170) return "success";
+            return null;
         }
 
         VNode Grid(DataGridView grid, string parentId, int order, HashSet<object> live)
@@ -430,6 +489,12 @@ namespace XulJ.Bridge
                 n.Rows.Add(r);
             }
             n.Attrs["class"] = "mono";
+            n.Attrs["seltype"] = grid.MultiSelect ? "multiple" : "single";
+            // Rows count as selected when the row is, or (in cell selection modes) any of its cells.
+            var sel = grid.SelectedRows.Cast<DataGridViewRow>().Select(r => r.Index)
+                .Concat(grid.SelectedCells.Cast<DataGridViewCell>().Select(cell => cell.RowIndex))
+                .Where(i => i >= 0 && i < n.Rows.Count).Distinct().OrderBy(i => i).ToList();
+            n.Attrs["selection"] = sel;
             return n;
         }
 
@@ -445,6 +510,8 @@ namespace XulJ.Bridge
                 for (int i = 0; i < count; i++) r["c" + i] = i < it.SubItems.Count ? it.SubItems[i].Text : "";
                 return r;
             }).ToList();
+            n.Attrs["seltype"] = lv.MultiSelect ? "multiple" : "single";
+            n.Attrs["selection"] = lv.SelectedIndices.Cast<int>().OrderBy(x => x).ToList();
             return n;
         }
 

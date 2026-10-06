@@ -25,6 +25,8 @@ namespace LegacyOrders
         CheckBox expressCheck;
         Button addButton;
         DataGridView ordersGrid;
+        ContextMenuStrip gridMenu;
+        ToolStripMenuItem duplicateItem, deleteSelectedItem;
         Label importLabel;
         Button importButton;
         ProgressBar importProgress;
@@ -163,6 +165,45 @@ namespace LegacyOrders
             ordersGrid.Columns.Add("express", "Express");
             ordersGrid.Columns.Add("total", "Total");
             ordersGrid.Columns["customer"].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            ordersGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            ordersGrid.MultiSelect = true;
+            ordersGrid.CellDoubleClick += (s, e) =>
+            {
+                if (e.RowIndex < 0) return;
+                var r = ordersGrid.Rows[e.RowIndex];
+                MessageBox.Show(this, "Order " + r.Cells["order"].Value + " for " + r.Cells["customer"].Value + "\n" +
+                    r.Cells["qty"].Value + " × " + r.Cells["product"].Value + ", total " + r.Cells["total"].Value,
+                    "Order details", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+            ordersGrid.SelectionChanged += (s, e) => SetStatus(ordersGrid.SelectedRows.Count + " selected");
+
+            // Context menu: its Opening handler decides what is enabled, as many apps do.
+            gridMenu = new ContextMenuStrip { Name = "gridMenu" };
+            duplicateItem = new ToolStripMenuItem("&Duplicate order") { Name = "duplicateItem" };
+            deleteSelectedItem = new ToolStripMenuItem("De&lete orders…") { Name = "deleteSelectedItem" };
+            gridMenu.Items.AddRange(new ToolStripItem[] { duplicateItem, new ToolStripSeparator(), deleteSelectedItem });
+            gridMenu.Opening += (s, e) =>
+            {
+                int n = ordersGrid.SelectedRows.Count;
+                duplicateItem.Enabled = n == 1;
+                deleteSelectedItem.Enabled = n > 0;
+                deleteSelectedItem.Text = n == 1 ? "De&lete order…" : "De&lete " + n + " orders…";
+            };
+            duplicateItem.Click += (s, e) =>
+            {
+                var src = ordersGrid.SelectedRows[0];
+                ordersGrid.Rows.Add(nextOrder++, src.Cells["customer"].Value, src.Cells["product"].Value, src.Cells["qty"].Value, src.Cells["express"].Value, "");
+                RecomputeTotals();
+                SetStatus("Duplicated order " + src.Cells["order"].Value);
+            };
+            deleteSelectedItem.Click += (s, e) =>
+            {
+                var rows = ordersGrid.SelectedRows.Cast<DataGridViewRow>().ToList();
+                if (MessageBox.Show(this, "Delete " + rows.Count + " selected order(s)?", "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                foreach (var r in rows) ordersGrid.Rows.Remove(r);
+                SetStatus("Deleted " + rows.Count + " order(s)");
+            };
+            ordersGrid.ContextMenuStrip = gridMenu;
 
             ordersPage.Controls.Add(ordersGrid);
             ordersPage.Controls.Add(newOrderGroup); // added last = docked first, so the group sits on top
