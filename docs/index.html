@@ -33,6 +33,9 @@
       <a href="#mapping">Control mapping</a>
       <a href="#menus">Menus</a>
       <a href="#dialogs">Dialogs</a>
+      <a href="#theme">Theme</a>
+      <a href="#selection">Selection &amp; context menus</a>
+      <a href="#agents">AI agents (MCP)</a>
       <a href="#http">HTTP endpoints</a>
       <a href="#security">Security</a>
       <a href="#limitations">Limitations</a>
@@ -205,13 +208,37 @@ static void Main()
       </table>
       <p>An exception thrown by an app event handler appears as an error notification in the browser.</p>
 
+      <h2 id="theme">Theme</h2>
+      <p>The form's <code>BackColor</code>, <code>ForeColor</code> and <code>Font</code>, and the system highlight colour, become XUL-J theme tokens; density follows the font size (8.25 pt is compact). A dark app stays dark in dark mode. Labels painted in a colour of their own get a role instead of a raw colour: a <code>Firebrick</code> error label becomes <code>danger</code>, an orange one <code>warning</code>, green <code>success</code>, grey <code>muted</code>.</p>
+      <p>The browser applies these as design tokens, never as CSS, and the viewer stays in charge: in high-contrast mode producer colours are ignored, in dark mode only a dark palette is used, and colour pairs that would fall below WCAG contrast are dropped.</p>
+
+      <h2 id="selection">Selection &amp; context menus</h2>
+      <p><code>DataGridView</code> (full-row or cell selection), <code>ListBox</code> and <code>ListView</code> report their selection, and selections made in the browser are applied as a user's would be, so <code>SelectionChanged</code> fires. Double-click or Enter raises <code>CellDoubleClick</code>, <code>ItemActivate</code> or <code>DoubleClick</code>.</p>
+      <p>A control's <code>ContextMenuStrip</code> becomes a context menu. Right-click selects the row and opens it at the pointer; the bridge sets <code>SourceControl</code> and runs the app's <code>Opening</code> handler, so items enable and relabel as on the desktop ("Delete 2 orders…").</p>
+
+      <h2 id="agents">AI agents (MCP)</h2>
+      <p>The <a href="https://github.com/xul-j/xul-j#mcp-let-ai-agents-operate-any-xul-j-interface">XUL-J MCP server</a> lets an AI agent operate the app through the same semantic tree the browser renders: labelled elements, explicit commands, enabled state, tables and dialogs. No screenshots, no pixel guessing. Each agent connection is its own session, with its own instance of the app.</p>
+<pre><code>claude mcp add legacy-orders -- node ../xul-j/mcp/server.js --url http://127.0.0.1:8092</code></pre>
+      <table class="map">
+        <thead><tr><th>Tool</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td><code>get_ui</code>, <code>list_commands</code></td><td>Read the screen as an outline with ids, values, commands, tables and dialogs</td></tr>
+          <tr><td><code>set_value</code>, <code>do_command</code></td><td>Fill fields, then press buttons or choose menu items</td></tr>
+          <tr><td><code>read_table</code>, <code>select_rows</code>, <code>activate_row</code></td><td>Work with grids and lists</td></tr>
+          <tr><td><code>open_context_menu</code></td><td>Open a right-click menu; the app enables its items</td></tr>
+          <tr><td><code>upload_file</code>, <code>download_file</code></td><td>Answer open and save dialogs</td></tr>
+          <tr><td><code>wait_for</code></td><td>Wait for something slow to finish</td></tr>
+        </tbody>
+      </table>
+      <p>Every action answers with what changed, so the agent rarely needs to re-read the screen. <code>test/mcp-e2e.js</code> has an agent fix a validation error, duplicate a row from the right-click menu, answer a confirmation, and export and re-import a CSV.</p>
+
       <h2 id="http">HTTP endpoints</h2>
       <table class="map">
         <thead><tr><th>Request</th><th>Purpose</th></tr></thead>
         <tbody>
           <tr><td><code>GET /</code></td><td>The browser client (embedded in <code>xulj-host.exe</code>)</td></tr>
           <tr><td><code>GET /stream?session=&lt;id&gt;</code></td><td>Server-sent events. Creates the session (and its form) on first use, and resumes from <code>Last-Event-ID</code> or <code>?from=</code>.</td></tr>
-          <tr><td><code>POST /intent?session=&lt;id&gt;</code></td><td><code>{"op":"do","command":…}</code> or <code>{"op":"input","id":…,"value":…}</code>. Returns 202, or 400 (malformed), 404 (unknown target) or 409 (disabled).</td></tr>
+          <tr><td><code>POST /intent?session=&lt;id&gt;</code></td><td><code>{"op":"do","command":…}</code>, <code>{"op":"input","id":…,"value":…}</code>, <code>{"op":"select","id":…,"rows":[…]}</code>, <code>{"op":"activate","id":…,"row":…}</code> or <code>{"op":"contextmenu","id":…,"target":…}</code>. Returns 202, or 400 (malformed), 404 (unknown target) or 409 (disabled).</td></tr>
           <tr><td><code>POST /upload?session=&lt;id&gt;&amp;id=&lt;picker&gt;</code></td><td>A file for a file picker, with the name in <code>X-Filename</code>. Returns 202, 404 (not a file picker) or 413 (over 100 MB).</td></tr>
           <tr><td><code>GET /download/&lt;token&gt;</code></td><td>A file the app saved, sent as an attachment. The token is 128 random bits.</td></tr>
         </tbody>
@@ -227,7 +254,7 @@ static void Main()
       <h2 id="limitations">Limitations</h2>
       <ul>
         <li>Owner-drawn controls, custom painting and images don't render.</li>
-        <li>Context menus (<code>ContextMenuStrip</code>), grid and list selection, and cell editing aren't mapped yet.</li>
+        <li>Cell editing isn't mapped yet; tables are read-only in the browser.</li>
         <li>Dialogs opened through P/Invoke (<code>user32!MessageBox</code>, <code>GetOpenFileName</code>) aren't intercepted.</li>
         <li>Heavily overlapping absolute layouts come out as rows.</li>
       </ul>

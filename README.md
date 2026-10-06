@@ -63,6 +63,29 @@ which render as XUL-J modal windows. Calls from other threads still run the orig
 An exception thrown by an app event handler becomes an error notification in the browser.
 Uploads are limited to 100 MB.
 
+## Theme, selection and context menus
+
+- **Theme:** the form's `BackColor`/`ForeColor`/`Font` and the system highlight colour become XUL-J
+  theme tokens (density from the font size), so the app keeps its look; dark apps stay dark.
+  Labels painted in a colour of their own get a role (`danger`, `warning`, `success`, `muted`).
+- **Selection:** `DataGridView`, `ListBox` and `ListView` selection works both ways (the app sees
+  `SelectionChanged`); double-click or Enter raises `CellDoubleClick` / `ItemActivate` / `DoubleClick`.
+- **Context menus:** a control's `ContextMenuStrip` becomes a `menupopup`. Right-click selects the row
+  and opens it; the bridge sets `SourceControl` and runs the app's `Opening` handler, so items enable
+  and relabel exactly as on the desktop.
+
+## AI agents (MCP)
+
+The [XUL-J MCP server](https://github.com/xul-j/xul-j#mcp-let-ai-agents-operate-any-xul-j-interface)
+turns a bridged app into tools an agent can use: read the screen as labelled elements, fill
+fields, run commands, select rows, open context menus, answer dialogs, upload and download files.
+No screenshots: the agent works with the same semantic tree the browser renders.
+
+    claude mcp add legacy-orders -- node ../xul-j/mcp/server.js --url http://127.0.0.1:8092
+
+`node test/mcp-e2e.js` shows it end to end: fixing a validation error, a right-click duplicate,
+a confirmation dialog, exporting and re-importing a CSV.
+
 ## Mapping
 
 | WinForms | XUL-J |
@@ -85,7 +108,6 @@ Uploads are limited to 100 MB.
 - The app's `Main()` is not run (xulj-host instantiates the form), so setup done in `Main` is skipped.
 - Dialogs called through P/Invoke (`user32!MessageBox`, `GetOpenFileName`) are not intercepted;
   only the managed APIs listed under Dialogs are.
-- Owner-drawn controls, custom painting and images do not render. Context menus
-  (`ContextMenuStrip`), grid and list selection, and cell editing are not mapped yet.
+- Owner-drawn controls, custom painting and images do not render. Cell editing is not mapped yet.
 - Every session is a live form instance on the host, with no authentication and no session limit.
 - Layout inference covers designer-style forms; heavily overlapping absolute layouts come out as rows.
