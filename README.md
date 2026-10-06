@@ -20,7 +20,8 @@ The build embeds the browser client from the base repo, so clone both side by si
     ./build.sh                      # → out/xulj-host.exe, out/LegacyOrders.exe (XULJ_BASE=../xul-j)
     docker run -d --init --name xulj-bridge -p 8092:8092 -v "$PWD/out":/app:ro \
       xulj-mono xvfb-run -a mono /app/xulj-host.exe /app/LegacyOrders.exe --port 8092
-    node test/bridge-e2e.js         # end-to-end checks against the running bridge
+    node test/bridge-e2e.js         # 18 end-to-end checks against the running bridge
+    node test/mcp-e2e.js            # an agent operating the demo through the XUL-J MCP server
 
 `--init` matters: as PID 1, `xvfb-run` never sees Xvfb's ready signal and hangs silently.
 

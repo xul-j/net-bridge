@@ -54,7 +54,8 @@
       </p>
       <div class="callout">
         <strong>Status: prototype.</strong> Tested end to end on Linux with Mono's WinForms under Xvfb
-        (16 checks, including every dialog type). It targets the .NET Framework 4.x API, but it has
+        (18 checks covering dialogs, menus, selection, context menus and theming, plus an agent driving the
+        demo through MCP). It targets the .NET Framework 4.x API, but it has
         <em>not yet been run on Windows</em>. There is no authentication.
       </div>
 
@@ -279,8 +280,10 @@ src/Dialogs.cs      Harmony patches and browser-friendly dialog forms
 src/Launcher.cs     xulj-host.exe command line
 src/Json.cs         dependency-free JSON
 demo/LegacyOrders.cs  a designer-style demo app with menus, grid, timers and dialogs
-test/bridge-e2e.js  end-to-end test against a running bridge (needs ../xul-j)</code></pre>
-<pre><code>node test/bridge-e2e.js http://127.0.0.1:8092</code></pre>
+test/bridge-e2e.js  end-to-end test against a running bridge (needs ../xul-j)
+test/mcp-e2e.js     an agent operating the demo through the XUL-J MCP server</code></pre>
+<pre><code>node test/bridge-e2e.js http://127.0.0.1:8092
+node test/mcp-e2e.js http://127.0.0.1:8092</code></pre>
       <p>Source and issues: <a href="https://github.com/xul-j/net-bridge">github.com/xul-j/net-bridge</a>. MIT licensed.</p>
     </main>
   </div>
