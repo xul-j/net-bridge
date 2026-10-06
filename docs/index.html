@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>net-bridge · XUL-J</title>
+  <meta name="description" content="net-bridge serves unmodified .NET WinForms applications to browsers through the XUL-J protocol.">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/docs.css">
+</head>
+<body>
+  <header class="top">
+    <nav class="wrap">
+      <a class="brand" href="/">XUL-J</a>
+      <span class="links">
+        <a href="/generate.html">Generator</a>
+        <a href="/net-bridge/" aria-current="page">net-bridge</a>
+        <a href="/java-bridge/">java-bridge</a>
+        <a href="https://github.com/xul-j/net-bridge">GitHub</a>
+      </span>
+    </nav>
+  </header>
+
+  <div class="wrap doc">
+    <nav class="toc" aria-label="On this page">
+      <strong>net-bridge</strong>
+      <a href="#overview">Overview</a>
+      <a href="#quick-start">Quick start</a>
+      <a href="#command-line">Command line</a>
+      <a href="#embedding">Embedding</a>
+      <a href="#how">How it works</a>
+      <a href="#layout">Layout inference</a>
+      <a href="#mapping">Control mapping</a>
+      <a href="#menus">Menus</a>
+      <a href="#dialogs">Dialogs</a>
+      <a href="#http">HTTP endpoints</a>
+      <a href="#security">Security</a>
+      <a href="#limitations">Limitations</a>
+      <a href="#troubleshooting">Troubleshooting</a>
+      <a href="#development">Development</a>
+    </nav>
+
+    <main class="content">
+      <p class="eyebrow">XUL-J bridge · .NET WinForms</p>
+      <h1 id="overview">net-bridge</h1>
+      <p class="lede">
+        Serve an existing, <strong>unmodified</strong> WinForms application to browsers. Each browser
+        session gets its own instance of the app's main form, kept off-screen. The bridge streams the
+        live control tree as <a href="/#protocol">XUL-J operations</a> and turns clicks and edits in the
+        browser into real events on the real controls.
+      </p>
+      <div class="callout">
+        <strong>Status: prototype.</strong> Tested end to end on Linux with Mono's WinForms under Xvfb
+        (16 checks, including every dialog type). It targets the .NET Framework 4.x API, but it has
+        <em>not yet been run on Windows</em>. There is no authentication.
+      </div>
+
+      <h2 id="quick-start">Quick start</h2>
+      <h3>Linux, with Docker (Mono + Xvfb)</h3>
+      <p>The build embeds the browser client from the base repository, so clone both side by side:</p>
+<pre><code>git clone https://github.com/xul-j/xul-j
+git clone https://github.com/xul-j/net-bridge && cd net-bridge
+docker build -t xulj-mono docker
+./build.sh        <span class="c"># → out/xulj-host.exe, out/0Harmony.dll, out/LegacyOrders.exe</span>
+docker run -d --init --name xulj-bridge -p 8092:8092 -v "$PWD/out":/app:ro \
+  xulj-mono xvfb-run -a mono /app/xulj-host.exe /app/LegacyOrders.exe --port 8092</code></pre>
+      <p>Open <code>http://localhost:8092/</code>. Every browser tab gets its own copy of the demo app.</p>
+
+      <h3>Windows</h3>
+      <p>
+        Compile the sources with a C# 7.3 compiler: Roslyn's <code>csc</code> from Visual Studio or the
+        Build Tools. The <code>csc.exe</code> under <code>Windows\Microsoft.NET\Framework</code> only
+        understands C# 5 and will not work. Fetch <code>0Harmony.dll</code> (Lib.Harmony 2.3.3,
+        <code>lib/net472</code>) into <code>lib\</code> first, or run <code>build.sh</code> once on any
+        machine with Docker.
+      </p>
+<pre><code>csc -langversion:7.3 -target:exe -out:xulj-host.exe ^
+  -r:System.Windows.Forms.dll -r:System.Drawing.dll -r:System.Net.dll -r:lib\0Harmony.dll ^
+  -resource:..\xul-j\public\index.html,public/index.html ^
+  -resource:..\xul-j\public\xulj.js,public/xulj.js ^
+  -resource:..\xul-j\public\xul.css,public/xul.css ^
+  src\*.cs
+
+xulj-host.exe C:\Apps\Orders\Orders.exe --host localhost --port 8092</code></pre>
+      <p>
+        On a desktop no virtual display is needed. Off-screen forms are moved to (−32000, −32000).
+        <code>HttpListener</code> needs a URL reservation for any host other than
+        <code>localhost</code>: <code>netsh http add urlacl url=http://*:8092/ user=Everyone</code>.
+      </p>
+
+      <h2 id="command-line">Command line</h2>
+<pre><code>xulj-host.exe App.exe [--form Namespace.MainForm] [--port 8092] [--host *]</code></pre>
+      <table class="map">
+        <thead><tr><th>Option</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>App.exe</code></td><td>The WinForms assembly to host. Its own DLLs are resolved from its folder, which also becomes the working directory.</td></tr>
+          <tr><td><code>--form</code></td><td>The form to instantiate per session (full or short type name). Without it: <code>MainForm</code>, then <code>Form1</code>, then the only form with a parameterless constructor. If none fits, the candidates are listed.</td></tr>
+          <tr><td><code>--port</code></td><td>Listening port (default 8092).</td></tr>
+          <tr><td><code>--host</code></td><td>Listening host for <code>HttpListener</code> (default <code>*</code>). Use <code>localhost</code> unless the machine is behind your own access control.</td></tr>
+        </tbody>
+      </table>
+      <p>The app's own <code>Main()</code> is not run, so setup done there (configuration, login, data connections) is skipped. If the app needs it, use embedding instead.</p>
+
+      <h2 id="embedding">Embedding</h2>
+      <p>If you can change the app, replace its <code>Application.Run</code> call and keep everything <code>Main</code> does:</p>
+<pre><code>[STAThread]
+static void Main()
+{
+    Application.EnableVisualStyles();
+    Config.Load();                                    <span class="c">// your startup code still runs</span>
+    XulJBridge.Run(() => new MainForm(), new BridgeOptions
+    {
+        Port = 8092,
+        Host = "localhost",
+        TickMs = 50,                                  <span class="c">// how often the UI is diffed</span>
+        SessionTtl = TimeSpan.FromMinutes(10),        <span class="c">// idle sessions are closed after this</span>
+        Log = Console.Out,
+    });
+}</code></pre>
+
+      <h2 id="how">How it works</h2>
+      <ol class="steps">
+        <li><strong>Sessions.</strong> When a browser opens <code>/stream?session=…</code>, the bridge creates the form on the UI thread, moves it off-screen and shows it, so <code>Load</code> fires and the app's timers start. Forms the app opens later (dialogs, more windows) belong to the session that acted last.</li>
+        <li><strong>Rendering.</strong> Every <code>TickMs</code> the bridge walks the session's forms and builds a virtual XUL-J tree, inferring layout as described below.</li>
+        <li><strong>Diffing.</strong> The new tree is compared with the previous one, and only the differences are sent, in an order the client can apply: command changes, removals, attribute updates, new elements (parents first), then row data. Grid rows are appended when the old rows are a prefix of the new ones.</li>
+        <li><strong>Streaming.</strong> Operations are numbered and logged per session. A client that reconnects with <code>Last-Event-ID</code> receives only what it missed. Downloads and notifications are transient and never replayed.</li>
+        <li><strong>Intents.</strong> A browser click arrives as <code>{"op":"do","command":"cmd_addButton"}</code>. It is checked synchronously on the UI thread (unknown target 404, disabled 409), then run with <code>BeginInvoke</code>, so an app that opens a modal dialog never blocks the HTTP server. Clicks call the control's own <code>OnClick</code> (or <code>ToolStripItem.PerformClick</code>), so <code>Click</code> handlers and <code>Button.DialogResult</code> behave as usual. Edits set <code>Text</code>, <code>Checked</code>, <code>SelectedIndex</code> or <code>Value</code>, which raise the app's change events.</li>
+      </ol>
+
+      <h2 id="layout">Layout inference</h2>
+      <p>WinForms positions controls absolutely; XUL-J lays them out with flexible boxes. The bridge converts as follows:</p>
+      <table class="map">
+        <thead><tr><th>WinForms</th><th>XUL-J</th></tr></thead>
+        <tbody>
+          <tr><td><code>Dock</code> Top / Bottom / Left / Right / Fill</td><td>Nested vbox and hbox, processed in WinForms' order (the last control in <code>Controls</code> docks first). <code>Fill</code> gets <code>flex: 1</code>.</td></tr>
+          <tr><td>Absolutely placed controls</td><td>Grouped into rows by vertical overlap and ordered by <code>Left</code>. Each control's width runs up to the next control's <code>Left</code>, which keeps the designer's label column aligned.</td></tr>
+          <tr><td><code>Anchor</code> Left | Right</td><td><code>flex: 1</code> (stretches)</td></tr>
+          <tr><td><code>Anchor</code> Right only</td><td>A spacer before it (right-aligned)</td></tr>
+          <tr><td><code>Anchor</code> Top | Bottom</td><td>Its row grows (<code>flex</code>, <code>align: stretch</code>)</td></tr>
+          <tr><td><code>AutoSize</code> controls</td><td>Keep their natural size, because their text can change</td></tr>
+          <tr><td><code>FlowLayoutPanel</code> / <code>TableLayoutPanel</code></td><td>hbox or vbox / one hbox per table row</td></tr>
+          <tr><td><code>SplitContainer</code></td><td>Two panels, the first sized by <code>SplitterDistance</code></td></tr>
+        </tbody>
+      </table>
+      <p>
+        Element ids come from the control's <code>Name</code>, then from a strip item's text
+        (<code>Export CSV…</code> → <code>exportCsv</code>), then from its type. Commands are
+        <code>cmd_&lt;id&gt;</code>. <code>&amp;Add</code> becomes Alt+A, and <code>CancelButton</code>
+        becomes Escape.
+      </p>
+
+      <h2 id="mapping">Control mapping</h2>
+      <table class="map">
+        <thead><tr><th>WinForms</th><th>XUL-J</th></tr></thead>
+        <tbody>
+          <tr><td>Form</td><td>window (<code>modal</code> when shown with <code>ShowDialog</code>)</td></tr>
+          <tr><td>Button</td><td>button + command (<code>AcceptButton</code> is <code>primary</code>)</td></tr>
+          <tr><td>TextBox, MaskedTextBox, RichTextBox, NumericUpDown</td><td>textbox (<code>password</code>, <code>multiline</code>)</td></tr>
+          <tr><td>CheckBox, RadioButton</td><td>checkbox (radio exclusivity stays WinForms' own)</td></tr>
+          <tr><td>ComboBox, ToolStripComboBox</td><td>menulist</td></tr>
+          <tr><td>DataGridView, ListView, ListBox</td><td>tree with a row source (formatted cell values)</td></tr>
+          <tr><td>ProgressBar, TrackBar, ToolStripProgressBar</td><td>progressmeter</td></tr>
+          <tr><td>TabControl / TabPage</td><td>tabbox / tabpanel</td></tr>
+          <tr><td>GroupBox, Panel, UserControl, SplitContainer, FlowLayoutPanel, TableLayoutPanel</td><td>groupbox / boxes</td></tr>
+          <tr><td>ToolStrip, StatusStrip</td><td>toolbar, statusbar (<code>Spring</code> labels flex)</td></tr>
+          <tr><td>Label, DateTimePicker</td><td>label, read-only textbox</td></tr>
+          <tr><td>anything else</td><td>a muted <code>[TypeName]</code> placeholder</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="menus">Menus</h2>
+      <p>
+        <code>MenuStrip</code> becomes a <code>menubar</code>. Every <code>ToolStripMenuItem</code> with
+        drop-down items becomes a <code>menu</code> (submenus included), separators become
+        <code>menuseparator</code>, and leaf items become <code>menuitem</code> with a command.
+        <code>&amp;File</code> opens with Alt+F, <code>ShortcutKeys</code> are shown next to the item and
+        bound, and <code>Checked</code> / <code>CheckOnClick</code> items show a check mark.
+        <code>ToolStripDropDownButton</code> and <code>ToolStripSplitButton</code> become drop-down menus
+        in the toolbar.
+      </p>
+      <p>
+        Menus open and close in the browser with no round trip. They support hovering across the bar,
+        arrow keys, Home and End, and Escape. Only choosing an item reaches the app, as
+        <code>PerformClick</code>.
+      </p>
+
+      <h2 id="dialogs">Dialogs</h2>
+      <p>
+        On Windows, <code>MessageBox</code> and the common dialogs are native windows that the bridge
+        could neither see nor drive. At startup it patches them with
+        <a href="https://github.com/pardeike/Harmony">Harmony</a> (MIT). On the bridge's UI thread they
+        then show ordinary managed forms, rendered as modal XUL-J windows. Calls from other threads run
+        the original implementation.
+      </p>
+      <table class="map">
+        <thead><tr><th>The app calls</th><th>The browser sees</th></tr></thead>
+        <tbody>
+          <tr><td><code>MessageBox.Show(…)</code>, all overloads</td><td>A modal window with the message, icon and the same buttons. The default button responds to Enter and the cancel button to Escape. The app gets the matching <code>DialogResult</code>.</td></tr>
+          <tr><td><code>OpenFileDialog</code></td><td>A file picker (<code>accept</code> from the first <code>Filter</code>, <code>Multiselect</code> honoured). The browser uploads, and <code>FileName</code> / <code>FileNames</code> point at the uploaded copies, which keep their original names.</td></tr>
+          <tr><td><code>SaveFileDialog</code></td><td>A file-name prompt. The app writes to a temporary path; once the file has stopped changing, the browser downloads it.</td></tr>
+          <tr><td><code>Microsoft.VisualBasic.Interaction.InputBox</code></td><td>A prompt with a text box (an empty string on Cancel, as in VB)</td></tr>
+          <tr><td>Print, Color, Font, FolderBrowser dialogs</td><td>Cancelled, with a notification</td></tr>
+          <tr><td>The app's own <code>Form.ShowDialog()</code></td><td>A modal window; the owner is disabled meanwhile</td></tr>
+        </tbody>
+      </table>
+      <p>An exception thrown by an app event handler appears as an error notification in the browser.</p>
+
+      <h2 id="http">HTTP endpoints</h2>
+      <table class="map">
+        <thead><tr><th>Request</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /</code></td><td>The browser client (embedded in <code>xulj-host.exe</code>)</td></tr>
+          <tr><td><code>GET /stream?session=&lt;id&gt;</code></td><td>Server-sent events. Creates the session (and its form) on first use, and resumes from <code>Last-Event-ID</code> or <code>?from=</code>.</td></tr>
+          <tr><td><code>POST /intent?session=&lt;id&gt;</code></td><td><code>{"op":"do","command":…}</code> or <code>{"op":"input","id":…,"value":…}</code>. Returns 202, or 400 (malformed), 404 (unknown target) or 409 (disabled).</td></tr>
+          <tr><td><code>POST /upload?session=&lt;id&gt;&amp;id=&lt;picker&gt;</code></td><td>A file for a file picker, with the name in <code>X-Filename</code>. Returns 202, 404 (not a file picker) or 413 (over 100 MB).</td></tr>
+          <tr><td><code>GET /download/&lt;token&gt;</code></td><td>A file the app saved, sent as an attachment. The token is 128 random bits.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="security">Security</h2>
+      <ul>
+        <li>There is <strong>no authentication</strong>. Anyone who reaches the port can start sessions, and every session is a live instance of your application running with the bridge's rights. Bind to <code>localhost</code>, or put the bridge behind a reverse proxy that authenticates.</li>
+        <li>There is no session limit. Idle sessions are closed after <code>SessionTtl</code>.</li>
+        <li>The browser never receives code. Uploads only reach file pickers, and downloads only serve files the app saved through a save dialog.</li>
+      </ul>
+
+      <h2 id="limitations">Limitations</h2>
+      <ul>
+        <li>Owner-drawn controls, custom painting and images don't render.</li>
+        <li>Context menus (<code>ContextMenuStrip</code>), grid and list selection, and cell editing aren't mapped yet.</li>
+        <li>Dialogs opened through P/Invoke (<code>user32!MessageBox</code>, <code>GetOpenFileName</code>) aren't intercepted.</li>
+        <li>Heavily overlapping absolute layouts come out as rows.</li>
+      </ul>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <dl class="faq">
+        <dt>The Docker container starts but serves nothing, and logs nothing.</dt>
+        <dd>Run it with <code>--init</code>. As PID 1, <code>xvfb-run</code> never sees Xvfb's ready signal and waits forever.</dd>
+        <dt><code>HttpListenerException: Access is denied</code> on Windows.</dt>
+        <dd>Use <code>--host localhost</code>, or add a URL reservation with <code>netsh http add urlacl</code>.</dd>
+        <dt>“dialog patches unavailable” in the log.</dt>
+        <dd><code>0Harmony.dll</code> is missing from next to <code>xulj-host.exe</code>. Without it, native dialogs stay invisible to the browser.</dd>
+        <dt>A control shows as <code>[SomeControl]</code>.</dt>
+        <dd>It has no mapping yet. Please open an issue with the control type.</dd>
+      </dl>
+
+      <h2 id="development">Development</h2>
+<pre><code>src/Renderer.cs     control tree → virtual XUL-J tree (layout inference, mapping, menus)
+src/Reconciler.cs   frame diffing → minimal ops
+src/Bridge.cs       sessions, UI thread, HttpListener, SSE, intents, uploads, downloads
+src/Dialogs.cs      Harmony patches and browser-friendly dialog forms
+src/Launcher.cs     xulj-host.exe command line
+src/Json.cs         dependency-free JSON
+demo/LegacyOrders.cs  a designer-style demo app with menus, grid, timers and dialogs
+test/bridge-e2e.js  end-to-end test against a running bridge (needs ../xul-j)</code></pre>
+<pre><code>node test/bridge-e2e.js http://127.0.0.1:8092</code></pre>
+      <p>Source and issues: <a href="https://github.com/xul-j/net-bridge">github.com/xul-j/net-bridge</a>. MIT licensed.</p>
+    </main>
+  </div>
+
+  <footer class="bottom">
+    <div class="wrap">
+      <span>XUL-J · MIT licensed · <a href="/">Home</a> · <a href="/java-bridge/">java-bridge</a></span>
+      <span>net-bridge docs · served from <a href="https://github.com/xul-j/net-bridge/tree/main/docs">/docs</a></span>
+    </div>
+  </footer>
+</body>
+</html>
