@@ -8,6 +8,19 @@ const BASE = path.resolve(process.env.XULJ_BASE || path.join(__dirname, '../../x
 const { validate } = require(`${BASE}/protocol/validate`);
 const { Model, renderText } = require(`${BASE}/protocol/model`);
 const { stream, intent } = require(`${BASE}/clients/sse`);
+const http = require('http');
+
+function request(method, url, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, { method, headers }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve({ status: res.statusCode, body: data, headers: res.headers }));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
 
 const base = process.argv[2] || 'http://127.0.0.1:8092';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -121,16 +134,77 @@ function client(session) {
     c.close();
   });
 
-  await step('a modal MessageBox appears as a second window and can be answered', async () => {
+  const dialog = () => a.model.root.children.find((w) => w.attrs.modal && !w.attrs.hidden);
+  const dialogButton = (label) => [...a.model.ids.values()].find((n) => n.tag === 'button' && n.attrs.label === label && isIn(n, dialog()));
+  const show = (w) => console.log(renderText({ ...a.model, root: { tag: 'root', children: [w], attrs: {} }, resolved: a.model.resolved.bind(a.model) })
+    .split('\n').map((l) => `      ${l}`).join('\n'));
+
+  await step('MessageBox.Show becomes a modal window with icon, message and default button', async () => {
     assert.strictEqual(a.attr('confirmCheck', 'value'), true);
+    const count = a.rows('ordersGrid').length;
     await a.send({ op: 'do', command: 'cmd_clearButton' });
-    await until(() => a.model.root.children.length === 2, 'dialog window');
-    const dialog = a.model.root.children[1];
-    console.log(renderText({ ...a.model, root: { tag: 'root', children: [dialog], attrs: {} }, resolved: a.model.resolved.bind(a.model) }).split('\n').map((l) => `      ${l}`).join('\n'));
-    const yes = [...a.model.ids.values()].find((n) => n.tag === 'button' && /^yes$/i.test(n.attrs.label) && isIn(n, dialog));
-    assert(yes, 'Yes button in dialog');
-    await a.send({ op: 'do', command: yes.attrs.command });
-    await until(() => a.model.root.children.length === 1 && a.rows('ordersGrid').length === 0, 'grid cleared after Yes');
+    await until(() => dialog(), 'dialog window');
+    show(dialog());
+    assert.strictEqual(dialog().attrs.icon, 'warning');
+    assert.strictEqual(dialog().children[0].attrs.value, `Delete all ${count} orders?`);
+    assert.strictEqual(dialogButton('No').attrs.class, 'primary', 'MessageBoxDefaultButton.Button2');
+    assert.strictEqual(a.model.commands.get('cmd_clearButton').disabled, true, 'owner is disabled while modal');
+    await a.send({ op: 'do', command: dialogButton('Yes').attrs.command });
+    await until(() => !dialog() && a.rows('ordersGrid').length === 0, 'grid cleared after Yes');
+  });
+
+  await step('Interaction.InputBox becomes a prompt; the answer flows back into the app', async () => {
+    await a.send({ op: 'do', command: 'cmd_defaultCustomerItem' });
+    await until(() => dialog() && a.model.ids.has('response'), 'input box');
+    assert.strictEqual(dialog().attrs.icon, 'question');
+    await a.send({ op: 'input', id: 'response', value: 'Globex' });
+    await a.send({ op: 'do', command: dialogButton('OK').attrs.command });
+    await until(() => !dialog() && a.attr('customerText', 'value') === 'Globex', 'default customer applied');
+  });
+
+  await step('SaveFileDialog: the app writes a temp file and the browser is told to download it', async () => {
+    await a.send({ op: 'do', command: 'cmd_addButton' });
+    await until(() => a.rows('ordersGrid').length === 1, 'one order');
+    await a.send({ op: 'do', command: 'cmd_exportItem' });
+    await until(() => dialog() && a.model.ids.has('fileName'), 'save dialog');
+    assert.strictEqual(a.attr('fileName', 'value'), 'orders.csv');
+    await a.send({ op: 'input', id: 'fileName', value: 'march.csv' });
+    await a.send({ op: 'do', command: dialogButton('Save').attrs.command });
+    await until(() => a.model.transient.some((t) => t.op === 'download'), 'download op', 5000);
+    const dl = a.model.transient.find((t) => t.op === 'download');
+    assert.deepStrictEqual(validate(dl), []);
+    assert.strictEqual(dl.name, 'march.csv');
+    const file = await request('GET', base + dl.url);
+    assert.strictEqual(file.status, 200);
+    assert.match(file.headers['content-disposition'], /attachment; filename="march.csv"/);
+    assert.strictEqual(file.body.trim().split('\n')[1].split(',').slice(1, 5).join(','), 'Globex,Gizmo,3,yes'); // product, qty and express kept from the earlier order
+    assert.strictEqual((await request('GET', `${base}/download/${'0'.repeat(32)}`)).status, 404);
+  });
+
+  await step('OpenFileDialog: the browser uploads a file and the app reads it from a temp path', async () => {
+    await a.send({ op: 'do', command: 'cmd_importItem' });
+    await until(() => dialog() && a.model.ids.has('picker'), 'open dialog');
+    assert.strictEqual(a.attr('picker', 'accept'), '.csv');
+    assert.strictEqual(a.model.commands.get(dialogButton('Open').attrs.command).disabled, true, 'Open waits for a file');
+    const csv = 'order,customer,product,qty\n1,Initech,Gadget,2\n2,Hooli,Gizmo,1\nbroken line\n';
+    const up = await request('POST', `${base}/upload?session=${session}&id=picker`, csv, { 'X-Filename': encodeURIComponent('legacy export.csv') });
+    assert.strictEqual(up.status, 202, up.body);
+    await until(() => a.attr('picker', 'value') === 'legacy export.csv', 'picker shows file');
+    await until(() => a.model.commands.get(dialogButton('Open').attrs.command).disabled === false, 'Open enabled');
+    await a.send({ op: 'do', command: dialogButton('Open').attrs.command });
+    await until(() => a.rows('ordersGrid').length === 3, 'two rows imported');
+    await until(() => dialog() && dialog().attrs.icon === 'warning', 'skipped-lines warning');
+    assert.match(dialog().children[0].attrs.value, /^1 lines could not be read/);
+    await a.send({ op: 'do', command: dialogButton('OK').attrs.command });
+    await until(() => !dialog() && a.attr('statusLabel', 'value') === 'Imported 2 orders from legacy export.csv', 'import status');
+    const bad = await request('POST', `${base}/upload?session=${session}&id=customerText`, 'x', { 'X-Filename': 'x.txt' });
+    assert.strictEqual(bad.status, 404, 'uploads only reach file pickers');
+  });
+
+  await step('dialogs without a browser equivalent are cancelled with a notification', async () => {
+    await a.send({ op: 'do', command: 'cmd_printItem' });
+    await until(() => a.model.transient.some((t) => t.op === 'notify' && /PrintDialog/.test(t.message)), 'notify');
+    await until(() => a.attr('statusLabel', 'value') === 'Print cancelled', 'app saw Cancel');
   });
 
   await step('File › Exit closes the form; the session ends cleanly', async () => {

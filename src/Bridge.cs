@@ -47,7 +47,20 @@ namespace XulJ.Bridge
         public DateTime LastSeen = DateTime.UtcNow;
         public bool Ended;
 
+        public readonly List<PendingDownload> Pending = new List<PendingDownload>();
+        public readonly ConcurrentDictionary<string, PendingDownload> Downloads = new ConcurrentDictionary<string, PendingDownload>();
+
         public Session(string id) { Id = id; }
+
+        // Transient ops (download, notify) go to live clients only: replaying them would repeat them.
+        public void EmitTransient(Dictionary<string, object> op)
+        {
+            lock (Sync)
+            {
+                string frame = "data: " + Json.Write(op) + "\n\n";
+                foreach (var s in Subscribers) s.TryAdd(frame);
+            }
+        }
 
         public void Emit(Dictionary<string, object> op)
         {
@@ -61,6 +74,14 @@ namespace XulJ.Bridge
         }
     }
 
+    sealed class PendingDownload
+    {
+        public string Path, Name, Token;
+        public long LastSize = -1;
+        public int StableTicks;
+        public DateTime Created = DateTime.UtcNow;
+    }
+
     sealed class Host
     {
         static readonly MethodInfo OnClick = typeof(Control).GetMethod("OnClick", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -70,7 +91,38 @@ namespace XulJ.Bridge
         readonly ConcurrentDictionary<string, Session> sessions = new ConcurrentDictionary<string, Session>();
         readonly HashSet<Form> owned = new HashSet<Form>();
         Control ui; // marshals work onto the UI thread
+        Thread uiThread;
         Session lastActive;
+        static readonly string TempRoot = Path.Combine(Path.GetTempPath(), "xulj-bridge-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+        const long MaxUpload = 100L * 1024 * 1024;
+
+        public bool OnUiThread => Thread.CurrentThread == uiThread;
+
+        // The form a dialog should belong to: the newest visible form of the session that acted last.
+        public IWin32Window ActiveForm() => lastActive?.Forms.LastOrDefault(f => !f.IsDisposed && f.Visible);
+
+        public void Notify(string message, string level)
+        {
+            lastActive?.EmitTransient(new Dictionary<string, object> { { "op", "notify" }, { "message", message }, { "level", level } });
+        }
+
+        // Called on the UI thread when the app saves a file: it writes to a temp path, and
+        // once the file stops changing the browser is told to download it.
+        public string ExpectDownload(string name)
+        {
+            var d = new PendingDownload { Name = name, Token = Token() };
+            Directory.CreateDirectory(Path.Combine(TempRoot, "down", d.Token));
+            d.Path = Path.Combine(TempRoot, "down", d.Token, name);
+            lastActive?.Pending.Add(d);
+            return d.Path;
+        }
+
+        static string Token()
+        {
+            var bytes = new byte[16];
+            using (var rng = System.Security.Cryptography.RandomNumberGenerator.Create()) rng.GetBytes(bytes);
+            return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
+        }
 
         public Host(Func<Form> createForm, BridgeOptions opt)
         {
@@ -80,8 +132,11 @@ namespace XulJ.Bridge
 
         public void Run()
         {
+            uiThread = Thread.CurrentThread;
             ui = new Control();
             ui.CreateControl();
+            try { Dialogs.Install(this); }
+            catch (Exception e) { opt.Log.WriteLine("dialog patches unavailable, native dialogs will not reach the browser: " + e.Message); }
             var timer = new System.Windows.Forms.Timer { Interval = opt.TickMs };
             timer.Tick += (s, e) => Tick();
             timer.Start();
@@ -134,12 +189,34 @@ namespace XulJ.Bridge
                         { "value", "The application closed this window. Reload to start a new session." }, { "class", "muted" } });
                     continue;
                 }
+                CheckDownloads(s);
                 try
                 {
                     s.Renderer.Render(s.Forms);
                     foreach (var op in s.Reconciler.Diff(s.Renderer.Nodes, s.Renderer.Commands)) s.Emit(op);
                 }
                 catch (Exception e) { opt.Log.WriteLine("render failed: " + e); }
+            }
+        }
+
+        static void CheckDownloads(Session s)
+        {
+            foreach (var d in s.Pending.ToList())
+            {
+                if (!File.Exists(d.Path))
+                {
+                    if (DateTime.UtcNow - d.Created > TimeSpan.FromMinutes(10)) s.Pending.Remove(d); // app never wrote it
+                    continue;
+                }
+                long size = new FileInfo(d.Path).Length;
+                d.StableTicks = size == d.LastSize ? d.StableTicks + 1 : 0;
+                d.LastSize = size;
+                if (d.StableTicks < 6) continue; // unchanged for ~300 ms
+                try { using (File.Open(d.Path, FileMode.Open, FileAccess.Read, FileShare.None)) { } }
+                catch (IOException) { continue; } // still open in the app
+                s.Pending.Remove(d);
+                s.Downloads[d.Token] = d;
+                s.EmitTransient(new Dictionary<string, object> { { "op", "download" }, { "url", "/download/" + d.Token }, { "name", d.Name } });
             }
         }
 
@@ -227,6 +304,8 @@ namespace XulJ.Bridge
                 string path = req.Url.AbsolutePath;
                 if (req.HttpMethod == "GET" && path == "/stream") Stream(ctx);
                 else if (req.HttpMethod == "POST" && path == "/intent") Intent(ctx);
+                else if (req.HttpMethod == "POST" && path == "/upload") Upload(ctx);
+                else if (req.HttpMethod == "GET" && path.StartsWith("/download/")) Download(ctx, path.Substring(10));
                 else if (req.HttpMethod == "GET") Static(res, path == "/" ? "/index.html" : path);
                 else Text(res, 405, "method not allowed");
             }
@@ -308,12 +387,61 @@ namespace XulJ.Bridge
                 {
                     lastActive = s;
                     try { action(); }
-                    catch (TargetInvocationException e) { opt.Log.WriteLine("app handler failed: " + e.InnerException); }
-                    catch (Exception e) { opt.Log.WriteLine("app handler failed: " + e); }
+                    catch (Exception e)
+                    {
+                        var inner = (e as TargetInvocationException)?.InnerException ?? e;
+                        opt.Log.WriteLine("app handler failed: " + inner);
+                        s.EmitTransient(new Dictionary<string, object> { { "op", "notify" }, { "level", "error" },
+                            { "message", "The application raised an error: " + inner.Message } });
+                    }
                 }));
             }
             lock (s.Sync) s.LastSeen = DateTime.UtcNow;
             Text(res, status, status == 202 ? "ok" : status == 409 ? "command disabled" : status == 404 ? "unknown target" : "bad intent");
+        }
+
+        // Browser → app: stores the file under a temp folder and hands the path to the FilePicker.
+        void Upload(HttpListenerContext ctx)
+        {
+            var res = ctx.Response;
+            Session s;
+            if (!sessions.TryGetValue(ctx.Request.QueryString["session"] ?? "", out s) || s.Ended) { Text(res, 404, "no such session"); return; }
+            string id = ctx.Request.QueryString["id"];
+            string name = Dialogs.SafeName(Uri.UnescapeDataString(ctx.Request.Headers["X-Filename"] ?? ""));
+            if (name.Length == 0) name = "upload";
+            bool known = (bool)ui.Invoke(new Func<bool>(() => s.Renderer.Lookup(id ?? "") is FilePicker p && p.Enabled));
+            if (!known) { Text(res, 404, "no file picker " + id); return; }
+
+            string dir = Path.Combine(TempRoot, "up", s.Id, Token());
+            Directory.CreateDirectory(dir);
+            string file = Path.Combine(dir, name);
+            long total = 0;
+            using (var output = File.Create(file))
+            {
+                var buf = new byte[81920];
+                int n;
+                while ((n = ctx.Request.InputStream.Read(buf, 0, buf.Length)) > 0)
+                {
+                    total += n;
+                    if (total > MaxUpload) break;
+                    output.Write(buf, 0, n);
+                }
+            }
+            if (total > MaxUpload) { File.Delete(file); Text(res, 413, "file too large"); return; }
+            ui.BeginInvoke(new Action(() => (s.Renderer.Lookup(id) as FilePicker)?.AddFile(file)));
+            Text(res, 202, "ok");
+        }
+
+        // App → browser: serves a file the app saved through a SaveFileDialog.
+        void Download(HttpListenerContext ctx, string token)
+        {
+            var res = ctx.Response;
+            var d = sessions.Values.Select(s => { PendingDownload x; return s.Downloads.TryGetValue(token, out x) ? x : null; }).FirstOrDefault(x => x != null);
+            if (d == null || !File.Exists(d.Path)) { Text(res, 404, "not found"); return; }
+            res.ContentType = "application/octet-stream";
+            res.Headers["Content-Disposition"] = "attachment; filename=\"" + Regex.Replace(d.Name, "[^A-Za-z0-9._ -]", "_") + "\"; filename*=UTF-8''" + Uri.EscapeDataString(d.Name);
+            using (var f = File.OpenRead(d.Path)) { res.ContentLength64 = f.Length; f.CopyTo(res.OutputStream); }
+            res.Close();
         }
 
         static readonly Dictionary<string, string> Types = new Dictionary<string, string>

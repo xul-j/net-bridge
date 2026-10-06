@@ -43,6 +43,25 @@ flags). HttpListener needs a URL ACL for `--host *`
 - Clicks call the control's `OnClick` (or `ToolStripItem.PerformClick`), so app handlers and
   `Button.DialogResult` behave as usual. `&` mnemonics become `alt+` keys, and menu `ShortcutKeys` carry over.
 
+## Dialogs
+
+On Windows, `MessageBox` and the common dialogs are native windows the bridge could neither see
+nor drive. At startup the bridge patches them with [Harmony](https://github.com/pardeike/Harmony)
+(MIT, fetched by `build.sh`). On the bridge's UI thread they then show ordinary managed forms,
+which render as XUL-J modal windows. Calls from other threads still run the original code.
+
+| App calls | Browser sees |
+|---|---|
+| `MessageBox.Show(...)` (all overloads) | modal window with the message, icon, the same buttons, default button (Enter) and cancel button (Escape); returns the matching `DialogResult` |
+| `OpenFileDialog.ShowDialog()` | a file picker (`accept` from the first `Filter`, `Multiselect` honoured). The browser uploads, and the app gets `FileName`/`FileNames` pointing at the uploaded copies under a temp folder, with the original file names |
+| `SaveFileDialog.ShowDialog()` | a file-name prompt. The app writes to a temp path; once the file stops changing, the browser downloads it |
+| `Microsoft.VisualBasic.Interaction.InputBox` | a prompt with a text box (empty string on Cancel, as in VB) |
+| other `CommonDialog`s (Print, Color, Font, FolderBrowser…) | cancelled, with a browser notification, because they have no browser equivalent |
+| the app's own `Form.ShowDialog()` | a modal window; the owner form is disabled meanwhile, as in WinForms |
+
+An exception thrown by an app event handler becomes an error notification in the browser.
+Uploads are limited to 100 MB.
+
 ## Mapping
 
 | WinForms | XUL-J |
@@ -62,8 +81,8 @@ flags). HttpListener needs a URL ACL for `--host *`
 ## Limitations
 
 - The app's `Main()` is not run (xulj-host instantiates the form), so setup done in `Main` is skipped.
-- On Windows, `MessageBox.Show` is a native dialog the bridge cannot see. A session that opens
-  one waits until someone answers it on the host. Mono's MessageBox is a Form, so it works there.
+- Dialogs called through P/Invoke (`user32!MessageBox`, `GetOpenFileName`) are not intercepted;
+  only the managed APIs listed under Dialogs are.
 - Owner-drawn controls, custom painting and images do not render. Menus are flattened. Grid and
   list selection, and cell editing, are not mapped yet.
 - Every session is a live form instance on the host, with no authentication and no session limit.

@@ -56,9 +56,18 @@ namespace XulJ.Bridge
                 var win = Add(f, "window", "root", i, live);
                 win.Attrs["label"] = f.Text ?? "";
                 if (!f.Visible) win.Attrs["hidden"] = true;
-                // Mono paints MessageBox text instead of using a Label; surface it as one.
-                var msg = f.GetType().GetField("msgbox_text", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                if (msg != null) AddBox(win.Id + "__msg", "description", win.Id, -1).Attrs["value"] = msg.GetValue(f) as string ?? "";
+                if (f.Modal) win.Attrs["modal"] = true;
+                if (f is BridgeDialog bd)
+                {
+                    if (bd.IconKind != null) win.Attrs["icon"] = bd.IconKind;
+                    AddBox(win.Id + "__msg", "description", win.Id, -1).Attrs["value"] = bd.Message;
+                }
+                else
+                {
+                    // Mono paints MessageBox text instead of using a Label; surface it as one.
+                    var msg = f.GetType().GetField("msgbox_text", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (msg != null) AddBox(win.Id + "__msg", "description", win.Id, -1).Attrs["value"] = msg.GetValue(f) as string ?? "";
+                }
                 LayoutChildren(f, win.Id, live);
             }
             // Forget controls that are gone so their ids can be reused.
@@ -336,6 +345,12 @@ namespace XulJ.Bridge
                 case TrackBar tr:
                     n = Add(c, "progressmeter", parentId, order, live);
                     n.Attrs["value"] = tr.Maximum > tr.Minimum ? (double)(tr.Value - tr.Minimum) / (tr.Maximum - tr.Minimum) : 0.0;
+                    break;
+                case FilePicker fp:
+                    n = Add(c, "filepicker", parentId, order, live);
+                    if (fp.Accept != null) n.Attrs["accept"] = fp.Accept;
+                    if (fp.Multiple) n.Attrs["multiple"] = true;
+                    if (fp.Files.Count > 0) n.Attrs["value"] = string.Join(", ", fp.Files.Select(System.IO.Path.GetFileName));
                     break;
                 case DataGridView grid: n = Grid(grid, parentId, order, live); break;
                 case ListView lv: n = ListViewTree(lv, parentId, order, live); break;

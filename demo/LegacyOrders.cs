@@ -3,6 +3,7 @@
 using System;
 using System.Drawing;
 using System.Globalization;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace LegacyOrders
@@ -10,7 +11,7 @@ namespace LegacyOrders
     public class MainForm : Form
     {
         MenuStrip menu;
-        ToolStripMenuItem fileMenu, newOrderItem, exitItem, helpMenu, aboutItem;
+        ToolStripMenuItem fileMenu, newOrderItem, importItem, exportItem, printItem, exitItem, editMenu, defaultCustomerItem, helpMenu, aboutItem;
         ToolStrip tools;
         ToolStripButton deleteLastButton, clearButton;
         ToolStripComboBox currencyBox;
@@ -40,6 +41,7 @@ namespace LegacyOrders
         static readonly string[] Products = { "Widget", "Gadget", "Gizmo", "Doohickey" };
         static readonly decimal[] Prices = { 4.50m, 12.00m, 7.25m, 19.99m };
         int nextOrder = 1001, importLeft;
+        string defaultCustomer = "";
 
         public MainForm()
         {
@@ -55,7 +57,12 @@ namespace LegacyOrders
             menu = new MenuStrip();
             fileMenu = new ToolStripMenuItem("&File");
             newOrderItem = new ToolStripMenuItem("&New order") { Name = "newOrderItem", ShortcutKeys = Keys.Control | Keys.N };
+            importItem = new ToolStripMenuItem("&Import CSV…") { Name = "importItem", ShortcutKeys = Keys.Control | Keys.O };
+            exportItem = new ToolStripMenuItem("&Export CSV…") { Name = "exportItem", ShortcutKeys = Keys.Control | Keys.S };
+            printItem = new ToolStripMenuItem("&Print…") { Name = "printItem" };
             exitItem = new ToolStripMenuItem("E&xit") { Name = "exitItem" };
+            editMenu = new ToolStripMenuItem("&Edit");
+            defaultCustomerItem = new ToolStripMenuItem("Default &customer…") { Name = "defaultCustomerItem" };
             helpMenu = new ToolStripMenuItem("&Help");
             aboutItem = new ToolStripMenuItem("&About") { Name = "aboutItem" };
             tools = new ToolStrip();
@@ -96,12 +103,21 @@ namespace LegacyOrders
 
             // menu
             menu.Name = "menu";
-            fileMenu.DropDownItems.AddRange(new ToolStripItem[] { newOrderItem, new ToolStripSeparator(), exitItem });
+            fileMenu.DropDownItems.AddRange(new ToolStripItem[] { newOrderItem, importItem, exportItem, printItem, new ToolStripSeparator(), exitItem });
+            editMenu.DropDownItems.Add(defaultCustomerItem);
             helpMenu.DropDownItems.Add(aboutItem);
-            menu.Items.AddRange(new ToolStripItem[] { fileMenu, helpMenu });
-            newOrderItem.Click += (s, e) => { customerText.Text = ""; quantityUpDown.Value = 1; expressCheck.Checked = false; SetStatus("New order"); };
+            menu.Items.AddRange(new ToolStripItem[] { fileMenu, editMenu, helpMenu });
+            importItem.Click += (s, e) => ImportCsv();
+            exportItem.Click += (s, e) => ExportCsv();
+            printItem.Click += (s, e) => { using (var pd = new PrintDialog()) if (pd.ShowDialog(this) == DialogResult.OK) SetStatus("Printing…"); else SetStatus("Print cancelled"); };
+            defaultCustomerItem.Click += (s, e) =>
+            {
+                string answer = Microsoft.VisualBasic.Interaction.InputBox("Customer to pre-fill for new orders:", "Default customer", defaultCustomer, -1, -1);
+                if (answer.Length > 0) { defaultCustomer = answer; customerText.Text = answer; SetStatus("Default customer: " + answer); }
+            };
+            newOrderItem.Click += (s, e) => { customerText.Text = defaultCustomer; quantityUpDown.Value = 1; expressCheck.Checked = false; SetStatus("New order"); };
             exitItem.Click += (s, e) => Close();
-            aboutItem.Click += (s, e) => MessageBox.Show(this, "Legacy Orders 1.0\nA WinForms app served by XUL-J.", "About");
+            aboutItem.Click += (s, e) => MessageBox.Show(this, "Legacy Orders 1.0\nA WinForms app served by XUL-J.", "About", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
             // tool strip
             tools.Name = "tools";
@@ -109,7 +125,7 @@ namespace LegacyOrders
             deleteLastButton.Click += (s, e) => DeleteLast();
             clearButton.Click += (s, e) =>
             {
-                if (confirmCheck.Checked && MessageBox.Show(this, "Delete all orders?", "Confirm", MessageBoxButtons.YesNo) != DialogResult.Yes) return;
+                if (confirmCheck.Checked && MessageBox.Show(this, "Delete all " + ordersGrid.Rows.Count + " orders?", "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
                 ordersGrid.Rows.Clear();
                 SetStatus("All orders cleared");
             };
@@ -217,6 +233,40 @@ namespace LegacyOrders
             RecomputeTotals();
             SetStatus("Added order for " + customerText.Text.Trim());
             customerText.Text = "";
+        }
+
+        void ExportCsv()
+        {
+            using (var dlg = new SaveFileDialog { Filter = "CSV files (*.csv)|*.csv", DefaultExt = "csv", FileName = "orders.csv", Title = "Export orders" })
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) { SetStatus("Export cancelled"); return; }
+                using (var w = new System.IO.StreamWriter(dlg.FileName))
+                {
+                    w.WriteLine("order,customer,product,qty,express,total");
+                    foreach (DataGridViewRow row in ordersGrid.Rows)
+                        w.WriteLine(string.Join(",", row.Cells.Cast<DataGridViewCell>().Select(c => Convert.ToString(c.Value, CultureInfo.InvariantCulture))));
+                }
+                SetStatus("Exported " + ordersGrid.Rows.Count + " orders to " + System.IO.Path.GetFileName(dlg.FileName));
+            }
+        }
+
+        void ImportCsv()
+        {
+            using (var dlg = new OpenFileDialog { Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*", Title = "Import orders" })
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) { SetStatus("Import cancelled"); return; }
+                int added = 0, skipped = 0;
+                foreach (var line in System.IO.File.ReadAllLines(dlg.FileName).Skip(1))
+                {
+                    var f = line.Split(',');
+                    if (f.Length < 4 || Array.IndexOf(Products, f[2]) < 0 || !int.TryParse(f[3], out int qty)) { skipped++; continue; }
+                    ordersGrid.Rows.Add(nextOrder++, f[1], f[2], qty, f.Length > 4 ? f[4] : "", "");
+                    added++;
+                }
+                RecomputeTotals();
+                SetStatus("Imported " + added + " orders from " + System.IO.Path.GetFileName(dlg.FileName));
+                if (skipped > 0) MessageBox.Show(this, skipped + " lines could not be read and were skipped.", "Import", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         void DeleteLast()
