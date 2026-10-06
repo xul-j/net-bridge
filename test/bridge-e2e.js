@@ -155,7 +155,7 @@ function client(session) {
     await a.send({ op: 'do', command: 'cmd_duplicateItem' });
     await until(() => a.rows('ordersGrid').length === before + 1 && a.rows('ordersGrid')[before].c1 === customer, 'duplicated');
     await a.send({ op: 'activate', id: 'ordersGrid', row: 0 });
-    await until(() => a.dialog() && a.dialog().attrs.label === 'Order details', 'double-click → details');
+    await until(() => a.dialog() && a.dialog().attrs.label === 'Order details' && a.dialogButton('OK'), 'double-click → details');
     assert.match(a.dialog().children[0].attrs.value, /^Order \d+ for /);
     await a.send({ op: 'do', command: a.dialogButton('OK').attrs.command });
     await until(() => !a.dialog(), 'closed');
