@@ -321,6 +321,7 @@ namespace XulJ.Bridge
                     n = Add(c, "textbox", parentId, order, live);
                     n.Attrs["value"] = tb.Text;
                     if (tb.ReadOnly) n.Attrs["disabled"] = true;
+                    if (tb.Multiline) n.Attrs["multiline"] = true;
                     if (tb is TextBox t && (t.PasswordChar != '\0' || t.UseSystemPasswordChar)) n.Attrs["password"] = true;
                     break;
                 case NumericUpDown nud:
